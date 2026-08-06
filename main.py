@@ -5,7 +5,7 @@ import tempfile
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from PIL import Image
+from PIL import Image, ImageOps
 
 # Word Document Libraries
 from docx import Document
@@ -19,7 +19,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Image as RLImage, T
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 
-app = FastAPI(title="Civil Site Inspection Report API")
+app = FastAPI(
+    title="Civil Site Inspection Report API",
+    version="1.0.0"
+)
 
 # Enable CORS for Vercel, Localhost, and Mobile App access
 app.add_middleware(
@@ -34,15 +37,26 @@ app.add_middleware(
 def cleanup_temp_file(path: str):
     """Deletes temporary generated report files after HTTP download completes."""
     if os.path.exists(path):
-        os.remove(path)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
 
 
 # --- IMAGE PROCESSING & DUAL-CONSTRAINT ZERO-CROP SCALING MATH ---
 def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
     img = Image.open(io.BytesIO(file_bytes))
+    
+    # Auto-orient based on smartphone camera EXIF tags
+    img = ImageOps.exif_transpose(img)
+    
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+
     if rotation != 0:
         # PIL rotates counter-clockwise for positive angles; -rotation rotates clockwise
         img = img.rotate(-rotation, expand=True)
+        
     return img
 
 
@@ -61,196 +75,228 @@ def get_fitted_dimensions(img_obj: Image.Image, max_w_in: float, max_h_in: float
 
 
 def prepare_temp_image(pil_img: Image.Image) -> str:
-    temp_img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-    pil_img.save(temp_img_path)
+    temp_img_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    temp_img_path = temp_img_file.name
+    temp_img_file.close()
+    pil_img.save(temp_img_path, format="PNG")
     return temp_img_path
 
 
 # --- WORD GENERATOR ENGINE ---
 def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols_per_page: int) -> str:
     doc = Document()
+    temp_files = []
 
-    for section in doc.sections:
-        section.top_margin = Inches(0.35)
-        section.bottom_margin = Inches(0.35)
-        section.left_margin = Inches(0.4)
-        section.right_margin = Inches(0.4)
+    try:
+        for section in doc.sections:
+            section.top_margin = Inches(0.35)
+            section.bottom_margin = Inches(0.35)
+            section.left_margin = Inches(0.4)
+            section.right_margin = Inches(0.4)
 
-    total_photos = len(photo_items)
-    chunk_size = photos_per_page
-    rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
-    page_avail_w = 7.7  # 8.5" - 0.8" margins
+        total_photos = len(photo_items)
+        chunk_size = photos_per_page
+        rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
+        page_avail_w = 7.7  # 8.5" - 0.8" margins
 
-    for i in range(0, total_photos, chunk_size):
-        is_first_page = (i == 0)
-        has_title = bool(is_first_page and title)
+        # Adaptive vertical spacing to prevent page overflows on high-density layouts
+        row_gap_pt = 100 if rows_per_page == 2 else (25 if rows_per_page == 3 else 10)
 
-        if has_title:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run(title)
-            run.font.name = "Calibri"
-            run.font.size = Pt(16)
-            run.font.bold = True
-            p.paragraph_format.space_after = Pt(8)
+        for i in range(0, total_photos, chunk_size):
+            is_first_page = (i == 0)
+            has_title = bool(is_first_page and title)
 
-        page_avail_h = 9.3 if has_title else 9.9
-        max_cell_w = (page_avail_w / cols_per_page) - 0.15
-        max_img_h = (page_avail_h / rows_per_page) - 1.25
+            if has_title:
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run(title)
+                run.font.name = "Calibri"
+                run.font.size = Pt(16)
+                run.font.bold = True
+                p.paragraph_format.space_after = Pt(8)
 
-        chunk = photo_items[i:i + chunk_size]
+            page_avail_h = 9.3 if has_title else 9.9
+            max_cell_w = (page_avail_w / cols_per_page) - 0.15
+            max_img_h = (page_avail_h / rows_per_page) - (1.25 if rows_per_page <= 2 else 0.8)
 
-        table = doc.add_table(rows=rows_per_page, cols=cols_per_page)
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            chunk = photo_items[i:i + chunk_size]
 
-        for r_idx in range(rows_per_page):
-            for c_idx in range(cols_per_page):
-                item_idx = r_idx * cols_per_page + c_idx
-                cell = table.cell(r_idx, c_idx)
-                cell.width = Inches(page_avail_w / cols_per_page)
+            table = doc.add_table(rows=rows_per_page, cols=cols_per_page)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-                if item_idx < len(chunk):
-                    item = chunk[item_idx]
-                    img = get_processed_image(item["file_bytes"], item.get("rotation", 0))
-                    w_in, h_in = get_fitted_dimensions(img, max_cell_w, max_img_h)
-                    img_path = prepare_temp_image(img)
+            for r_idx in range(rows_per_page):
+                for c_idx in range(cols_per_page):
+                    item_idx = r_idx * cols_per_page + c_idx
+                    cell = table.cell(r_idx, c_idx)
+                    cell.width = Inches(page_avail_w / cols_per_page)
 
-                    # Image Paragraph
-                    img_p = cell.paragraphs[0]
-                    img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    img_p.paragraph_format.space_before = Pt(0)
-                    img_p.paragraph_format.space_after = Pt(2)
-                    run = img_p.add_run()
-                    run.add_picture(img_path, width=Inches(w_in), height=Inches(h_in))
-                    os.remove(img_path)
+                    if item_idx < len(chunk):
+                        item = chunk[item_idx]
+                        img = get_processed_image(item["file_bytes"], item.get("rotation", 0))
+                        w_in, h_in = get_fitted_dimensions(img, max_cell_w, max_img_h)
+                        img_path = prepare_temp_image(img)
+                        temp_files.append(img_path)
 
-                    # Caption Paragraph - Apply 100pt gap between top and bottom rows
-                    cap_p = cell.add_paragraph()
-                    cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    cap_p.paragraph_format.space_before = Pt(2)
-                    cap_p.paragraph_format.space_after = Pt(100) if r_idx < rows_per_page - 1 else Pt(2)
+                        # Image Paragraph
+                        img_p = cell.paragraphs[0]
+                        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        img_p.paragraph_format.space_before = Pt(0)
+                        img_p.paragraph_format.space_after = Pt(2)
+                        run = img_p.add_run()
+                        run.add_picture(img_path, width=Inches(w_in), height=Inches(h_in))
 
-                    if item.get("caption"):
-                        cap_run = cap_p.add_run(item["caption"])
-                        cap_run.font.name = item.get("font_name", "Calibri")
-                        cap_run.font.size = Pt(item.get("font_size", 10))
-                        cap_run.font.bold = item.get("bold", False)
-                        cap_run.font.italic = item.get("italic", False)
+                        # Caption Paragraph
+                        cap_p = cell.add_paragraph()
+                        cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        cap_p.paragraph_format.space_before = Pt(2)
+                        cap_p.paragraph_format.space_after = Pt(row_gap_pt) if r_idx < rows_per_page - 1 else Pt(2)
 
-        if i + chunk_size < total_photos:
-            doc.add_page_break()
+                        if item.get("caption"):
+                            cap_run = cap_p.add_run(item["caption"])
+                            cap_run.font.name = item.get("font_name", "Calibri")
+                            cap_run.font.size = Pt(item.get("font_size", 10))
+                            cap_run.font.bold = item.get("bold", False)
+                            cap_run.font.italic = item.get("italic", False)
 
-    docx_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
-    doc.save(docx_path)
-    return docx_path
+            if i + chunk_size < total_photos:
+                doc.add_page_break()
+
+        docx_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
+        doc.save(docx_path)
+        return docx_path
+
+    finally:
+        # Clean up temporary PNG files created for the Word document
+        for tf in temp_files:
+            if os.path.exists(tf):
+                try:
+                    os.remove(tf)
+                except Exception:
+                    pass
 
 
 # --- PURE PYTHON PDF GENERATOR ENGINE ---
 def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_per_page: int) -> str:
     pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-    doc = SimpleDocTemplate(
-        pdf_path,
-        pagesize=letter,
-        leftMargin=0.4 * inch, rightMargin=0.4 * inch,
-        topMargin=0.35 * inch, bottomMargin=0.35 * inch
-    )
+    temp_files = []
 
-    styles = getSampleStyleSheet()
-    story = []
+    try:
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=letter,
+            leftMargin=0.4 * inch, rightMargin=0.4 * inch,
+            topMargin=0.35 * inch, bottomMargin=0.35 * inch
+        )
 
-    total_photos = len(photo_items)
-    chunk_size = photos_per_page
-    rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
-    page_avail_w = 7.7  # inches
+        styles = getSampleStyleSheet()
+        story = []
 
-    for i in range(0, total_photos, chunk_size):
-        is_first_page = (i == 0)
-        has_title = bool(is_first_page and title)
+        total_photos = len(photo_items)
+        chunk_size = photos_per_page
+        rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
+        page_avail_w = 7.7  # inches
 
-        if has_title:
-            title_style = ParagraphStyle(
-                'DocTitle',
-                parent=styles['Heading1'],
-                alignment=1,
-                fontSize=16,
-                leading=20,
-                spaceAfter=8
-            )
-            story.append(Paragraph(title, title_style))
+        # Adaptive padding to prevent ReportLab cell height overflow crashes
+        bottom_padding_pt = 100 if rows_per_page == 2 else (25 if rows_per_page == 3 else 10)
 
-        page_avail_h = 9.3 if has_title else 9.9
-        max_cell_w = (page_avail_w / cols_per_page) - 0.15
-        max_img_h = (page_avail_h / rows_per_page) - 1.25
+        for i in range(0, total_photos, chunk_size):
+            is_first_page = (i == 0)
+            has_title = bool(is_first_page and title)
 
-        chunk = photo_items[i:i + chunk_size]
-        table_data = []
+            if has_title:
+                title_style = ParagraphStyle(
+                    'DocTitle',
+                    parent=styles['Heading1'],
+                    alignment=1,
+                    fontSize=16,
+                    leading=20,
+                    spaceAfter=8
+                )
+                story.append(Paragraph(title, title_style))
 
-        for r in range(rows_per_page):
-            row_cells = []
-            for c in range(cols_per_page):
-                idx = r * cols_per_page + c
-                if idx < len(chunk):
-                    item = chunk[idx]
-                    img = get_processed_image(item["file_bytes"], item.get("rotation", 0))
-                    w_in, h_in = get_fitted_dimensions(img, max_cell_w, max_img_h)
-                    img_path = prepare_temp_image(img)
+            page_avail_h = 9.3 if has_title else 9.9
+            max_cell_w = (page_avail_w / cols_per_page) - 0.15
+            max_img_h = (page_avail_h / rows_per_page) - (1.25 if rows_per_page <= 2 else 0.8)
 
-                    rl_img = RLImage(img_path, width=w_in * inch, height=h_in * inch)
+            chunk = photo_items[i:i + chunk_size]
+            table_data = []
 
-                    cap_text = item.get("caption", "")
-                    tag_open = ""
-                    tag_close = ""
-                    if item.get("bold", False):
-                        tag_open += "<b>"
-                        tag_close = "</b>" + tag_close
-                    if item.get("italic", False):
-                        tag_open += "<i>"
-                        tag_close = "</i>" + tag_close
+            for r in range(rows_per_page):
+                row_cells = []
+                for c in range(cols_per_page):
+                    idx = r * cols_per_page + c
+                    if idx < len(chunk):
+                        item = chunk[idx]
+                        img = get_processed_image(item["file_bytes"], item.get("rotation", 0))
+                        w_in, h_in = get_fitted_dimensions(img, max_cell_w, max_img_h)
+                        img_path = prepare_temp_image(img)
+                        temp_files.append(img_path)
 
-                    font_family = "Helvetica"
-                    if item.get("font_name") == "Times New Roman":
-                        font_family = "Times-Roman"
+                        rl_img = RLImage(img_path, width=w_in * inch, height=h_in * inch)
 
-                    font_size = item.get("font_size", 10)
-                    p_style = ParagraphStyle(
-                        f'CapStyle_{i}_{idx}',
-                        alignment=1,
-                        fontName=font_family,
-                        fontSize=font_size,
-                        leading=font_size + 2,
-                        spaceBefore=2,
-                        spaceAfter=2
-                    )
-                    cap_p = Paragraph(f"{tag_open}{cap_text}{tag_close}", p_style)
+                        cap_text = item.get("caption", "")
+                        tag_open = ""
+                        tag_close = ""
+                        if item.get("bold", False):
+                            tag_open += "<b>"
+                            tag_close = "</b>" + tag_close
+                        if item.get("italic", False):
+                            tag_open += "<i>"
+                            tag_close = "</i>" + tag_close
 
-                    row_cells.append([rl_img, cap_p])
-                else:
-                    row_cells.append("")
+                        font_family = "Helvetica"
+                        if item.get("font_name") == "Times New Roman":
+                            font_family = "Times-Roman"
 
-            table_data.append(row_cells)
+                        font_size = item.get("font_size", 10)
+                        p_style = ParagraphStyle(
+                            f'CapStyle_{i}_{idx}',
+                            alignment=1,
+                            fontName=font_family,
+                            fontSize=font_size,
+                            leading=font_size + 2,
+                            spaceBefore=2,
+                            spaceAfter=2
+                        )
+                        cap_p = Paragraph(f"{tag_open}{cap_text}{tag_close}", p_style)
 
-        col_widths = [(page_avail_w / cols_per_page) * inch] * cols_per_page
-        t = Table(table_data, colWidths=col_widths)
+                        row_cells.append([rl_img, cap_p])
+                    else:
+                        row_cells.append("")
 
-        table_styles = [
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 0),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ]
+                table_data.append(row_cells)
 
-        if rows_per_page > 1:
-            for r in range(rows_per_page - 1):
-                table_styles.append(('BOTTOMPADDING', (0, r), (-1, r), 100))
+            col_widths = [(page_avail_w / cols_per_page) * inch] * cols_per_page
+            t = Table(table_data, colWidths=col_widths)
 
-        t.setStyle(TableStyle(table_styles))
+            table_styles = [
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, -1), 0),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ]
 
-        story.append(t)
-        if i + chunk_size < total_photos:
-            story.append(PageBreak())
+            if rows_per_page > 1:
+                for r in range(rows_per_page - 1):
+                    table_styles.append(('BOTTOMPADDING', (0, r), (-1, r), bottom_padding_pt))
 
-    doc.build(story)
-    return pdf_path
+            t.setStyle(TableStyle(table_styles))
+
+            story.append(t)
+            if i + chunk_size < total_photos:
+                story.append(PageBreak())
+
+        doc.build(story)
+        return pdf_path
+
+    finally:
+        # Clean up temporary PNG files created for ReportLab rendering
+        for tf in temp_files:
+            if os.path.exists(tf):
+                try:
+                    os.remove(tf)
+                except Exception:
+                    pass
 
 
 # --- API ENDPOINTS ---
@@ -271,7 +317,6 @@ async def generate_report(
     cols_per_page: int = Form(2),
 ):
     try:
-        # Parse JSON array containing individual image formatting attributes
         metadata = json.loads(metadata_json)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON format for metadata_json")
@@ -282,7 +327,6 @@ async def generate_report(
             detail="Mismatch between uploaded file count and metadata list length",
         )
 
-    # Read uploaded bytes and pair with corresponding metadata item
     photo_items = []
     for idx, file_obj in enumerate(files):
         file_bytes = await file_obj.read()
@@ -301,7 +345,7 @@ async def generate_report(
         media_type = "application/pdf"
         filename = "Site_Inspection_Report.pdf"
 
-    # Add background cleanup task so server storage isn't cluttered
+    # Background task unlinks the output report after client download completes
     background_tasks.add_task(cleanup_temp_file, out_path)
 
     return FileResponse(out_path, media_type=media_type, filename=filename)
