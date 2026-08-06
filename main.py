@@ -5,6 +5,7 @@ import tempfile
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.openapi.utils import get_openapi
 from PIL import Image, ImageOps
 
 # Word Document Libraries
@@ -21,9 +22,40 @@ from reportlab.lib.units import inch
 
 app = FastAPI(
     title="Civil Site Inspection Report API",
-    version="1.0.0",
-    openapi_version="3.0.2"
+    version="1.0.0"
 )
+
+# --- SWAGGER UI FILE UPLOAD FIX (OpenAPI 3.0.3 Patch) ---
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        routes=app.routes,
+    )
+    
+    # Force OpenAPI 3.0.3 spec so Swagger UI renders file controls correctly
+    openapi_schema["openapi"] = "3.0.3"
+    
+    for path in openapi_schema.get("paths", {}).values():
+        for method in path.values():
+            req_body = method.get("requestBody", {})
+            content = req_body.get("content", {})
+            if "multipart/form-data" in content:
+                schema = content["multipart/form-data"].get("schema", {})
+                props = schema.get("properties", {})
+                if "files" in props:
+                    props["files"] = {
+                        "type": "array",
+                        "items": {"type": "string", "format": "binary"}
+                    }
+                    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # Enable CORS for Vercel, Localhost, and Mobile App access
 app.add_middleware(
@@ -55,7 +87,6 @@ def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
         img = img.convert("RGB")
 
     if rotation != 0:
-        # PIL rotates counter-clockwise for positive angles; -rotation rotates clockwise
         img = img.rotate(-rotation, expand=True)
         
     return img
@@ -100,7 +131,6 @@ def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols
         rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
         page_avail_w = 7.7  # 8.5" - 0.8" margins
 
-        # Adaptive vertical spacing to prevent page overflows on high-density layouts
         row_gap_pt = 100 if rows_per_page == 2 else (25 if rows_per_page == 3 else 10)
 
         for i in range(0, total_photos, chunk_size):
@@ -167,7 +197,6 @@ def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols
         return docx_path
 
     finally:
-        # Clean up temporary PNG files created for the Word document
         for tf in temp_files:
             if os.path.exists(tf):
                 try:
@@ -197,7 +226,6 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
         rows_per_page = (photos_per_page + cols_per_page - 1) // cols_per_page
         page_avail_w = 7.7  # inches
 
-        # Adaptive padding to prevent ReportLab cell height overflow crashes
         bottom_padding_pt = 100 if rows_per_page == 2 else (25 if rows_per_page == 3 else 10)
 
         for i in range(0, total_photos, chunk_size):
@@ -291,7 +319,6 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
         return pdf_path
 
     finally:
-        # Clean up temporary PNG files created for ReportLab rendering
         for tf in temp_files:
             if os.path.exists(tf):
                 try:
@@ -311,7 +338,7 @@ async def generate_report(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     metadata_json: str = Form(...),
-    export_format: str = Form("pdf"),  # 'pdf' or 'docx'
+    export_format: str = Form("pdf"),
     doc_title: str = Form("SITE INSPECTION REPORT"),
     use_title: bool = Form(True),
     photos_per_page: int = Form(4),
@@ -346,7 +373,6 @@ async def generate_report(
         media_type = "application/pdf"
         filename = "Site_Inspection_Report.pdf"
 
-    # Background task unlinks the output report after client download completes
     background_tasks.add_task(cleanup_temp_file, out_path)
 
     return FileResponse(out_path, media_type=media_type, filename=filename)
