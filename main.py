@@ -25,7 +25,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# --- SWAGGER UI FILE UPLOAD FIX (OpenAPI 3.0.3 Patch) ---
+
+# --- SWAGGER UI FILE UPLOAD FIX (OpenAPI 3.0.3 Schema Patch) ---
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -36,28 +37,54 @@ def custom_openapi():
         routes=app.routes,
     )
     
-    # Force OpenAPI 3.0.3 spec so Swagger UI renders file controls correctly
+    # Force OpenAPI 3.0.3 spec compatibility
     openapi_schema["openapi"] = "3.0.3"
     
+    # Patch multipart/form-data schemas across endpoints
     for path in openapi_schema.get("paths", {}).values():
         for method in path.values():
             req_body = method.get("requestBody", {})
             content = req_body.get("content", {})
             if "multipart/form-data" in content:
                 schema = content["multipart/form-data"].get("schema", {})
-                props = schema.get("properties", {})
-                if "files" in props:
-                    props["files"] = {
+                
+                # Check direct properties
+                if "properties" in schema and "files" in schema["properties"]:
+                    schema["properties"]["files"] = {
+                        "title": "Files",
                         "type": "array",
                         "items": {"type": "string", "format": "binary"}
                     }
+                
+                # Check referenced schemas in components
+                if "$ref" in schema:
+                    ref_name = schema["$ref"].split("/")[-1]
+                    comp_schemas = openapi_schema.get("components", {}).get("schemas", {})
+                    if ref_name in comp_schemas and "properties" in comp_schemas[ref_name]:
+                        comp_schemas[ref_name]["properties"]["files"] = {
+                            "title": "Files",
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"}
+                        }
+
+    # Fallback patch for all component schemas
+    schemas = openapi_schema.get("components", {}).get("schemas", {})
+    for schema in schemas.values():
+        props = schema.get("properties", {})
+        if "files" in props:
+            props["files"] = {
+                "title": "Files",
+                "type": "array",
+                "items": {"type": "string", "format": "binary"}
+            }
                     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
 app.openapi = custom_openapi
 
-# Enable CORS for Vercel, Localhost, and Mobile App access
+
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
