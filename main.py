@@ -21,7 +21,8 @@ from reportlab.lib.units import inch
 
 app = FastAPI(
     title="Civil Site Inspection Report API",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_version="3.0.2"
 )
 
 # Enable CORS for Vercel, Localhost, and Mobile App access
