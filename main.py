@@ -102,7 +102,7 @@ def cleanup_temp_file(path: str):
             pass
 
 
-# --- IMAGE PROCESSING & DUAL-CONSTRAINT ZERO-CROP SCALING MATH ---
+# --- IMAGE PROCESSING & 90-DEGREE ROTATION MATH ---
 def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
     img = Image.open(io.BytesIO(file_bytes))
     
@@ -112,8 +112,14 @@ def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
 
-    if rotation != 0:
-        img = img.rotate(-rotation, expand=True)
+    try:
+        rot_angle = int(rotation) % 360
+    except (ValueError, TypeError):
+        rot_angle = 0
+
+    if rot_angle != 0:
+        # Rotate in 90-degree clockwise increments
+        img = img.rotate(-rot_angle, expand=True)
         
     return img
 
@@ -202,14 +208,15 @@ def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols
                         run = img_p.add_run()
                         run.add_picture(img_path, width=Inches(w_in), height=Inches(h_in))
 
-                        # Caption Paragraph
-                        cap_p = cell.add_paragraph()
-                        cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        cap_p.paragraph_format.space_before = Pt(2)
-                        cap_p.paragraph_format.space_after = Pt(row_gap_pt) if r_idx < rows_per_page - 1 else Pt(2)
+                        # Caption Paragraph (Only added if caption is explicitly written)
+                        caption = str(item.get("caption") or "").strip()
+                        if caption:
+                            cap_p = cell.add_paragraph()
+                            cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            cap_p.paragraph_format.space_before = Pt(2)
+                            cap_p.paragraph_format.space_after = Pt(row_gap_pt) if r_idx < rows_per_page - 1 else Pt(2)
 
-                        if item.get("caption"):
-                            cap_run = cap_p.add_run(item["caption"])
+                            cap_run = cap_p.add_run(caption)
                             cap_run.font.name = item.get("font_name", "Calibri")
                             cap_run.font.size = Pt(item.get("font_size", 10))
                             cap_run.font.bold = item.get("bold", False)
@@ -288,38 +295,41 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
                         temp_files.append(img_path)
 
                         rl_img = RLImage(img_path, width=w_in * inch, height=h_in * inch)
+                        cell_elements = [rl_img]
 
-                        cap_text = item.get("caption", "")
-                        tag_open = ""
-                        tag_close = ""
-                        if item.get("bold", False):
-                            tag_open += "<b>"
-                            tag_close = "</b>" + tag_close
-                        if item.get("italic", False):
-                            tag_open += "<i>"
-                            tag_close = "</i>" + tag_close
+                        caption = str(item.get("caption") or "").strip()
+                        if caption:
+                            tag_open = ""
+                            tag_close = ""
+                            if item.get("bold", False):
+                                tag_open += "<b>"
+                                tag_close = "</b>" + tag_close
+                            if item.get("italic", False):
+                                tag_open += "<i>"
+                                tag_close = "</i>" + tag_close
 
-                        requested_font = item.get("font_name", "Calibri")
-                        if requested_font == "Times New Roman":
-                            font_family = "Times-Roman"
-                        elif requested_font == "Courier New":
-                            font_family = "Courier"
-                        else:
-                            font_family = "Helvetica"
+                            requested_font = item.get("font_name", "Calibri")
+                            if requested_font == "Times New Roman":
+                                font_family = "Times-Roman"
+                            elif requested_font == "Courier New":
+                                font_family = "Courier"
+                            else:
+                                font_family = "Helvetica"
 
-                        font_size = item.get("font_size", 10)
-                        p_style = ParagraphStyle(
-                            f'CapStyle_{i}_{idx}',
-                            alignment=1,
-                            fontName=font_family,
-                            fontSize=font_size,
-                            leading=font_size + 2,
-                            spaceBefore=2,
-                            spaceAfter=2
-                        )
-                        cap_p = Paragraph(f"{tag_open}{cap_text}{tag_close}", p_style)
+                            font_size = item.get("font_size", 10)
+                            p_style = ParagraphStyle(
+                                f'CapStyle_{i}_{idx}',
+                                alignment=1,
+                                fontName=font_family,
+                                fontSize=font_size,
+                                leading=font_size + 2,
+                                spaceBefore=2,
+                                spaceAfter=2
+                            )
+                            cap_p = Paragraph(f"{tag_open}{caption}{tag_close}", p_style)
+                            cell_elements.append(cap_p)
 
-                        row_cells.append([rl_img, cap_p])
+                        row_cells.append(cell_elements)
                     else:
                         row_cells.append("")
 
