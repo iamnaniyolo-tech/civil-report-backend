@@ -121,7 +121,6 @@ def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
         rot_angle = 0
 
     if rot_angle != 0:
-        # Pillow rotates counter-clockwise by default; negative value rotates clockwise
         img = img.rotate(-rot_angle, expand=True)
         
     return img
@@ -156,7 +155,6 @@ def is_valid_caption_text(caption: str) -> bool:
     text = str(caption).strip()
     if not text:
         return False
-    # Suppress default automatic placeholders
     if text.lower() in ["site observation", "default caption", "photo description", "null", "none"]:
         return False
     return True
@@ -224,7 +222,7 @@ def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols
                         run = img_p.add_run()
                         run.add_picture(img_path, width=Inches(w_in), height=Inches(h_in))
 
-                        # Caption Paragraph (Only added if user typed a custom caption)
+                        # Caption Paragraph
                         raw_caption = item.get("caption")
                         if is_valid_caption_text(raw_caption):
                             cap_p = cell.add_paragraph()
@@ -400,6 +398,7 @@ async def generate_report(
     use_title: bool = Form(True),
     photos_per_page: int = Form(4),
     cols_per_page: int = Form(2),
+    custom_filename: str = Form("Site_Inspection_Report"),
 ):
     try:
         metadata = json.loads(metadata_json)
@@ -411,6 +410,17 @@ async def generate_report(
             status_code=400,
             detail="Mismatch between uploaded file count and metadata list length",
         )
+
+    # Sanitize and clean custom filename
+    raw_name = str(custom_filename or "").strip()
+    clean_name = "".join(c for c in raw_name if c.isalnum() or c in (" ", "_", "-")).strip()
+    
+    if not clean_name:
+        clean_name = "Site_Inspection_Report"
+
+    # Strip existing extensions if user entered them
+    if clean_name.lower().endswith(".pdf") or clean_name.lower().endswith(".docx"):
+        clean_name = os.path.splitext(clean_name)[0]
 
     photo_items = []
     for idx, file_obj in enumerate(files):
@@ -424,12 +434,12 @@ async def generate_report(
     if export_format.lower() == "docx":
         out_path = create_docx_report(title_to_use, photo_items, photos_per_page, cols_per_page)
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = "Site_Inspection_Report.docx"
+        final_filename = f"{clean_name}.docx"
     else:
         out_path = create_pdf_report(title_to_use, photo_items, photos_per_page, cols_per_page)
         media_type = "application/pdf"
-        filename = "Site_Inspection_Report.pdf"
+        final_filename = f"{clean_name}.pdf"
 
     background_tasks.add_task(cleanup_temp_file, out_path)
 
-    return FileResponse(out_path, media_type=media_type, filename=filename)
+    return FileResponse(out_path, media_type=media_type, filename=final_filename)
