@@ -106,8 +106,11 @@ def cleanup_temp_file(path: str):
 def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
     img = Image.open(io.BytesIO(file_bytes))
     
-    # Auto-orient based on smartphone camera EXIF tags
-    img = ImageOps.exif_transpose(img)
+    # Auto-orient based on EXIF tags
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
     
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
@@ -118,7 +121,7 @@ def get_processed_image(file_bytes: bytes, rotation: int = 0) -> Image.Image:
         rot_angle = 0
 
     if rot_angle != 0:
-        # Rotate in 90-degree clockwise increments
+        # Pillow rotates counter-clockwise by default; negative value rotates clockwise
         img = img.rotate(-rot_angle, expand=True)
         
     return img
@@ -144,6 +147,19 @@ def prepare_temp_image(pil_img: Image.Image) -> str:
     temp_img_file.close()
     pil_img.save(temp_img_path, format="PNG")
     return temp_img_path
+
+
+def is_valid_caption_text(caption: str) -> bool:
+    """Returns True only if the caption is non-empty and not a default placeholder."""
+    if not caption:
+        return False
+    text = str(caption).strip()
+    if not text:
+        return False
+    # Suppress default automatic placeholders
+    if text.lower() in ["site observation", "default caption", "photo description", "null", "none"]:
+        return False
+    return True
 
 
 # --- WORD GENERATOR ENGINE ---
@@ -208,15 +224,15 @@ def create_docx_report(title: str, photo_items: list, photos_per_page: int, cols
                         run = img_p.add_run()
                         run.add_picture(img_path, width=Inches(w_in), height=Inches(h_in))
 
-                        # Caption Paragraph (Only added if caption is explicitly written)
-                        caption = str(item.get("caption") or "").strip()
-                        if caption:
+                        # Caption Paragraph (Only added if user typed a custom caption)
+                        raw_caption = item.get("caption")
+                        if is_valid_caption_text(raw_caption):
                             cap_p = cell.add_paragraph()
                             cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                             cap_p.paragraph_format.space_before = Pt(2)
                             cap_p.paragraph_format.space_after = Pt(row_gap_pt) if r_idx < rows_per_page - 1 else Pt(2)
 
-                            cap_run = cap_p.add_run(caption)
+                            cap_run = cap_p.add_run(str(raw_caption).strip())
                             cap_run.font.name = item.get("font_name", "Calibri")
                             cap_run.font.size = Pt(item.get("font_size", 10))
                             cap_run.font.bold = item.get("bold", False)
@@ -297,8 +313,9 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
                         rl_img = RLImage(img_path, width=w_in * inch, height=h_in * inch)
                         cell_elements = [rl_img]
 
-                        caption = str(item.get("caption") or "").strip()
-                        if caption:
+                        raw_caption = item.get("caption")
+                        if is_valid_caption_text(raw_caption):
+                            caption_str = str(raw_caption).strip()
                             tag_open = ""
                             tag_close = ""
                             if item.get("bold", False):
@@ -326,7 +343,7 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
                                 spaceBefore=2,
                                 spaceAfter=2
                             )
-                            cap_p = Paragraph(f"{tag_open}{caption}{tag_close}", p_style)
+                            cap_p = Paragraph(f"{tag_open}{caption_str}{tag_close}", p_style)
                             cell_elements.append(cap_p)
 
                         row_cells.append(cell_elements)
