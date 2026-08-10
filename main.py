@@ -24,6 +24,8 @@ app = FastAPI(
     title="Civil Site Inspection Report API",
     version="1.0.0"
 )
+
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -89,16 +91,6 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
-
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def cleanup_temp_file(path: str):
@@ -307,9 +299,13 @@ def create_pdf_report(title: str, photo_items: list, photos_per_page: int, cols_
                             tag_open += "<i>"
                             tag_close = "</i>" + tag_close
 
-                        font_family = "Helvetica"
-                        if item.get("font_name") == "Times New Roman":
+                        requested_font = item.get("font_name", "Calibri")
+                        if requested_font == "Times New Roman":
                             font_family = "Times-Roman"
+                        elif requested_font == "Courier New":
+                            font_family = "Courier"
+                        else:
+                            font_family = "Helvetica"
 
                         font_size = item.get("font_size", 10)
                         p_style = ParagraphStyle(
