@@ -34,7 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+@app.get("/")
+def health_check():
+    return {"status": "online"}
 # --- SWAGGER UI FILE UPLOAD FIX (OpenAPI 3.0.3 Schema Patch) ---
 def custom_openapi():
     if app.openapi_schema:
